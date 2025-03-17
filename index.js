@@ -67,6 +67,14 @@ client.on(Events.InteractionCreate, interaction => vrchatLinkDetector.handleInte
 // Scanner les forums au démarrage
 client.once(Events.ClientReady, async () => {
     console.log('Bot prêt !');
+    client.user.setPresence({
+        status: 'online', // 'online', 'idle', 'dnd' (ne pas déranger), ou 'invisible'
+        activities: [{
+            name: 'boire du café ☕', // Texte affiché
+            type: 0 // 0 = "Joue à", 1 = "Stream", 2 = "Écoute", 3 = "Regarde", 5 = "Compétition"
+        }]
+    });
+
     try {
         const scanner = new ForumScanner(client, playersDB);
         const reportChannel = await client.channels.fetch(process.env.SCAN_REPORT_CHANNEL_ID);
