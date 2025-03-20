@@ -12,7 +12,7 @@ class ThreadCreator {
             vrchatID,       // L'ID VRChat du joueur
             vrchatName,     // Le nom d'utilisateur VRChat
             signaleur,      // L'utilisateur Discord qui signale
-            type,           // 'suspect' ou 'banned'
+            type,           // 'suspect' ou 'ban'
             playersDB,      // Instance de la base de données
             dataService     // Service de données VRChat (optionnel)
         } = options;
@@ -53,7 +53,7 @@ class ThreadCreator {
              */
             async createThread(selectedTags) {
                 // Créer le message du thread
-                const threadMessage = `**Nouveau signalement ${type === 'banned' ? 'banni' : 'suspect'}**\n\n` +
+                const threadMessage = `**Nouveau signalement ${type === 'ban' ? 'banni' : 'suspect'}**\n\n` +
                     `**Joueur:** ${vrchatName}\n` +
                     `**Profil VRChat:** https://vrchat.com/home/user/${vrchatID}\n` +
                     `**ID:** \`${vrchatID}\`\n` +
@@ -65,7 +65,8 @@ class ThreadCreator {
 
                 console.log('Thread Creator - Message à créer:', {
                     title: vrchatName,
-                    message: threadMessage
+                    message: threadMessage,
+                    vrchatID: vrchatID // Assurer que l'ID est enregistré ici
                 });
 
                 // Créer le thread avec le nom du joueur comme titre
@@ -87,7 +88,7 @@ class ThreadCreator {
                 const newPlayer = {
                     vrchatID,
                     vrchatName,
-                    type: type === 'banned' ? 'banned' : 'suspect',
+                    type: type === 'ban' ? 'ban' : 'suspect',
                     forumThreads: [{
                         threadId: thread.id,
                         tags: selectedTags,
@@ -97,8 +98,10 @@ class ThreadCreator {
 
                 // Utiliser le dataService si disponible, sinon utiliser directement playersDB
                 if (dataService) {
+                    console.log('Utilisation du dataService pour sauvegarder le joueur:', vrchatID);
                     dataService.savePlayerInfo(newPlayer);
                 } else {
+                    console.log('Utilisation directe de playersDB pour sauvegarder le joueur:', vrchatID);
                     const existingPlayer = playersDB.findPlayer(vrchatID);
                     if (existingPlayer) {
                         playersDB.updatePlayer(existingPlayer, newPlayer);
@@ -113,4 +116,4 @@ class ThreadCreator {
     }
 }
 
-module.exports = ThreadCreator;
+module.exports = { createSignalementThread: ThreadCreator.createSignalementThread };
