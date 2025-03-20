@@ -152,7 +152,6 @@ class ForumScanner {
             try {
                 const previousStatus = this.scannedThreads.get(threadId);
                 if (previousStatus === true) {
-                    console.log(`⏩ Thread déjà scanné avec VRChat : ${thread.name}`);
                     continue;
                 }
 
@@ -228,10 +227,10 @@ class ForumScanner {
     }
 
     async generateReport(threadsWithoutVRC, deletedThreads, playersWithMultipleThreads) {
-        let report = '📊 **Rapport du scan des forums**\n\n';
+        let report = '# 📊 Rapport du scan des forums\n\n';
 
         if (threadsWithoutVRC.length > 0) {
-            report += '❌ **Threads sans lien VRChat :**\n';
+            report += '## ❌ Threads sans lien VRChat\n';
             for (const thread of threadsWithoutVRC) {
                 const forumType = thread.type === 'banned' ? 'bannis' : 'suspects';
                 report += `• <#${thread.threadId}> (${forumType})\n`;
@@ -240,7 +239,7 @@ class ForumScanner {
         }
 
         if (deletedThreads.length > 0) {
-            report += '🗑️ **Threads supprimés ou inaccessibles :**\n';
+            report += '## 🗑️ Threads supprimés ou inaccessibles\n';
             for (const thread of deletedThreads) {
                 report += `• ${thread.threadId}\n`;
             }
@@ -248,20 +247,18 @@ class ForumScanner {
         }
 
         if (playersWithMultipleThreads.size > 0) {
-            report += '⚠️ **Joueurs avec plusieurs threads dans un même forum**\n';
+            report += '## ⚠️ Joueurs avec plusieurs threads\n';
             for (const [vrchatID, player] of playersWithMultipleThreads) {
-                report += `- **${player.vrchatName}** (\`${vrchatID}\`) - Forum ${player.type === 'suspect' ? 'suspects' : 'bannis'}\n`;
+                report += `### \`${player.vrchatName}\` - **${player.type === 'suspect' ? 'Suspect' : 'Banni'}**\n-# \`${vrchatID}\`\n`;
                 for (const thread of player.threads) {
                     const threadLink = `<#${thread.threadId}>`;
-                    const tags = thread.tags.length > 0 ? ` [${thread.tags.join(', ')}]` : '';
-                    report += `  • ${threadLink}${tags}\n`;
+                    report += `- ${threadLink}\n`;
                 }
-                report += '\n';
             }
         }
 
         if (threadsWithoutVRC.length === 0 && deletedThreads.length === 0 && playersWithMultipleThreads.size === 0) {
-            report += '✅ Aucun problème détecté\n';
+            report += '## ✅ Aucun problème détecté\n';
         }
 
         return report;
@@ -285,10 +282,10 @@ class ForumScanner {
         let currentMessage = '';
 
         // Envoyer le titre dans le premier message
-        await channel.send('📊 **Rapport du scan des forums**\n*(Suite du rapport dans les messages suivants...)*');
+        await channel.send('# 📊 Rapport du scan des forums');
 
         for (const section of sections) {
-            if (section === '📊 **Rapport du scan des forums**') continue;
+            if (section === '# 📊 Rapport du scan des forums') continue;
 
             const sectionWithNewline = section + '\n\n';
             

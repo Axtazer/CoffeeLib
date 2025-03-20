@@ -1,17 +1,19 @@
 const { Events, ButtonBuilder, ButtonStyle, ActionRowBuilder, MessageFlags } = require('discord.js');
 const { BAN_ROLES, SUSPECT_ROLES } = require('../config/permissions');
-const { createSignalementThread } = require('../utils/thread-creator');
+const ThreadCreator = require('../utils/thread-creator');
+const VRChatDataService = require('../utils/vrchat-data-service');
 
 class VRChatLinkDetector {
     constructor(playersDB) {
         this.playersDB = playersDB;
-        this.EMBED_WAIT_TIME = 450; // Temps avant de récup l'embed
-        this.MAX_RETRIES = 2; // Nombre de tentatives pour l'embed
-        this.RETRY_DELAY = 150; // Delais entre les tentatives
-        this.DEBUG = process.env.DEBUG === 'true';
+        this.dataService = new VRChatDataService(playersDB);
+        
+        // Configuration
+        this.DEBUG = process.env.DEBUG;
         this.ABANDON_TIMEOUT = 30000; // 30s avant de cloturer l'intéraction
         this.pendingMessages = new Map();
-        this.VRCHAT_LINK_REGEX = /(?:https?:\/\/)?vrchat\.com\/home\/user\/([a-zA-Z0-9-_]+)/;
+        
+        // IDs de canaux et forums
         this.VRCHAT_LINK_CHANNEL_ID = process.env.VRCHAT_LINK_CHANNEL_ID;
         this.FORUM_BANNIS_ID = process.env.FORUM_BANNIS_ID;
         this.FORUM_SUSPECTS_ID = process.env.FORUM_SUSPECTS_ID;
@@ -21,70 +23,29 @@ class VRChatLinkDetector {
         if (this.DEBUG) console.log(...args);
     }
 
-    async extractVRChatInfo(message) {
-        const match = message.content.match(this.VRCHAT_LINK_REGEX);
-        if (!match || !match[1]) return null;
-
-        const vrchatID = match[1];
-        let vrchatName = null;
-
-        // Utilisation d'une seule boucle avec Promise.race pour timeout
-        for (let attempt = 0; attempt < this.MAX_RETRIES; attempt++) {
-            try {
-                const fetchPromise = new Promise(async resolve => {
-                    await new Promise(r => setTimeout(r, this.EMBED_WAIT_TIME));
-                    const updatedMessage = await message.fetch();
-                    
-                    if (updatedMessage.embeds.length > 0) {
-                        const embed = updatedMessage.embeds[0];
-                        
-                        if (embed.data?.title) {
-                            vrchatName = embed.data.title;
-                            this.debug('Nom extrait depuis embed.data.title:', vrchatName);
-                            resolve(true);
-                        } else if (embed.title) {
-                            vrchatName = embed.title;
-                            this.debug('Nom extrait depuis embed.title:', vrchatName);
-                            resolve(true);
-                        } else {
-                            resolve(false);
-                        }
-                    } else {
-                        resolve(false);
-                    }
-                });
-
-                const timeoutPromise = new Promise(resolve => 
-                    setTimeout(() => resolve(false), this.EMBED_WAIT_TIME * 1.5));
-
-                const result = await Promise.race([fetchPromise, timeoutPromise]);
-                if (result) break;
-                
-                this.debug(`Tentative ${attempt + 1}/${this.MAX_RETRIES}`);
-            } catch (error) {
-                this.debug(`Tentative ${attempt + 1}/${this.MAX_RETRIES} échouée:`, error);
-            }
-        }
-
-        // Fallback si aucun nom n'est trouvé
-        vrchatName = vrchatName || vrchatID.replace(/^usr_/, '');
-        
-        return { vrchatID, vrchatName };
-    }
-
-    async checkPermissions(member, type) {
-        // Vérifie si un membre a les permissions pour un type donné
+    /**
+     * Vérifie si un membre a les permissions pour un type donné
+     * @param {GuildMember} member - Membre Discord
+     * @param {string} type - Type de dossier ('ban' ou 'suspect')
+     * @returns {boolean}
+     */
+    hasPermission(member, type) {
         if (type === 'ban' || type === 'banned') {
             return member.roles.cache.some(role => BAN_ROLES.includes(role.id));
         }
         return member.roles.cache.some(role => SUSPECT_ROLES.includes(role.id));
     }
 
-    async createButtons(member, vrchatID) {
-        // Crée les boutons adaptés aux permissions du membre
+    /**
+     * Crée les boutons adaptés aux permissions du membre
+     * @param {GuildMember} member - Membre Discord
+     * @param {string} vrchatID - ID VRChat
+     * @returns {ActionRowBuilder|null}
+     */
+    createActionButtons(member, vrchatID) {
         const buttons = [];
-        const canSuspect = await this.checkPermissions(member, 'suspect');
-        const canBan = await this.checkPermissions(member, 'ban');
+        const canSuspect = this.hasPermission(member, 'suspect');
+        const canBan = this.hasPermission(member, 'ban');
 
         if (canSuspect) {
             buttons.push(new ButtonBuilder()
@@ -105,12 +66,19 @@ class VRChatLinkDetector {
         return buttons.length ? new ActionRowBuilder().addComponents(buttons) : null;
     }
 
+    /**
+     * Gère un joueur existant dans la base de données
+     * @param {Message} message - Message Discord
+     * @param {Object} existingPlayer - Données du joueur existant
+     * @param {Object} vrchatInfo - Informations VRChat
+     * @param {GuildMember} member - Membre Discord
+     */
     async handleExistingPlayer(message, existingPlayer, vrchatInfo, member) {
-        const canBan = await this.checkPermissions(member, 'ban');
+        const canBan = this.hasPermission(member, 'ban');
         const status = existingPlayer.type === 'suspect' ? '⚠️ Suspect' : '🚫 Banni';
 
         // Vérifie les permissions pour le type de dossier existant
-        if (existingPlayer.type === 'ban' && !canBan) {
+        if (existingPlayer.type === 'banned' && !canBan) {
             await message.reply({ 
                 content: "Vous n'avez pas les permissions pour gérer les dossiers bannis.\nVa voir le salon <#1343718631833473106>",
                 flags: MessageFlags.Ephemeral 
@@ -118,37 +86,13 @@ class VRChatLinkDetector {
             return;
         }
 
-        // Filtrer les threads valides
-        const threadLinks = [];
-        const threadsToRemove = [];
-        
-        await Promise.all(existingPlayer.forumThreads.map(async threadInfo => {
-            try {
-                const thread = await message.guild.channels.fetch(threadInfo.threadId);
-                if (thread) {
-                    threadLinks.push(`<#${threadInfo.threadId}>`);
-                } else {
-                    threadsToRemove.push(threadInfo.threadId);
-                }
-            } catch (error) {
-                threadsToRemove.push(threadInfo.threadId);
-            }
-        }));
-
-        // Nettoyer les threads invalides de la base de données
-        if (threadsToRemove.length > 0) {
-            const updatedPlayer = {
-                ...existingPlayer,
-                forumThreads: existingPlayer.forumThreads.filter(
-                    t => !threadsToRemove.includes(t.threadId)
-                )
-            };
-            await this.playersDB.updatePlayer(existingPlayer, updatedPlayer);
-        }
+        // Nettoyer les threads invalides
+        const { player: updatedPlayer, validThreads } = 
+            await this.dataService.cleanInvalidThreads(existingPlayer, message.guild);
 
         // Si tous les threads ont été supprimés, permettre d'en créer un nouveau
-        if (threadLinks.length === 0) {
-            const row = await this.createButtons(member, vrchatInfo.vrchatID);
+        if (validThreads.length === 0) {
+            const row = this.createActionButtons(member, vrchatInfo.vrchatID);
             
             if (row) {
                 await message.reply({
@@ -167,23 +111,32 @@ class VRChatLinkDetector {
 
         // Afficher les threads existants
         await message.reply({
-            content: `# ${status}\n## Profil VRChat : \`${vrchatInfo.vrchatName}\`\n### Thread: ${threadLinks.join('\n')}\n-# ID VRC : \`${vrchatInfo.vrchatID}\``,
+            content: `# ${status}\n## Profil VRChat : \`${vrchatInfo.vrchatName}\`\n### Thread: ${validThreads.join('\n')}\n-# ID VRC : \`${vrchatInfo.vrchatID}\``,
             allowedMentions: { parse: [] }
         });
     }
 
+    /**
+     * Traite un message contenant un lien VRChat
+     * @param {Message} message - Message Discord
+     */
     async handleMessage(message) {
         // Filtres rapides pour éviter les traitements inutiles
         if (message.channel.id !== this.VRCHAT_LINK_CHANNEL_ID || message.author.bot) return;
 
-        const vrchatInfo = await this.extractVRChatInfo(message);
-        if (!vrchatInfo) return;
-
         try {
+            // Extraire les informations VRChat
+            const vrchatInfo = await this.dataService.extractVRChatInfo(message, {
+                debug: this.DEBUG
+            });
+            
+            if (!vrchatInfo) return;
+            this.debug('Informations VRChat extraites:', vrchatInfo);
+
             // Récupérer le membre et vérifier ses permissions
             const member = await message.guild.members.fetch(message.author.id);
-            const canSuspect = await this.checkPermissions(member, 'suspect');
-            const canBan = await this.checkPermissions(member, 'ban');
+            const canSuspect = this.hasPermission(member, 'suspect');
+            const canBan = this.hasPermission(member, 'ban');
 
             if (!canSuspect && !canBan) {
                 await message.reply({ 
@@ -194,14 +147,14 @@ class VRChatLinkDetector {
             }
 
             // Vérifier si le joueur existe déjà
-            const existingPlayer = this.playersDB.findPlayer(vrchatInfo.vrchatID);
+            const existingPlayer = this.dataService.getPlayerInfo(vrchatInfo.vrchatID);
             if (existingPlayer) {
                 await this.handleExistingPlayer(message, existingPlayer, vrchatInfo, member);
                 return;
             }
 
             // Traiter un nouveau joueur
-            const row = await this.createButtons(member, vrchatInfo.vrchatID);
+            const row = this.createActionButtons(member, vrchatInfo.vrchatID);
             if (!row) {
                 await message.reply({
                     content: "Vous n'avez pas les permissions nécessaires pour créer des signalements.",
@@ -234,6 +187,10 @@ class VRChatLinkDetector {
         }
     }
 
+    /**
+     * Gère l'interaction avec les boutons
+     * @param {ButtonInteraction} interaction - Interaction avec un bouton
+     */
     async handleInteraction(interaction) {
         if (!interaction.isButton()) return;
 
@@ -243,7 +200,7 @@ class VRChatLinkDetector {
         try {
             await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             
-            // Extraction efficace du nom VRChat
+            // Extraction efficace du nom VRChat depuis le message d'origine
             const originalMessage = await interaction.channel.messages.fetch(interaction.message.id);
             const nameMatch = originalMessage.content.match(/`([^`]+)`/);
             const vrchatName = nameMatch ? nameMatch[1] : vrchatID;
@@ -262,13 +219,14 @@ class VRChatLinkDetector {
             }
 
             // Créer le thread
-            const threadCreator = await createSignalementThread({
+            const threadCreator = await ThreadCreator.createSignalementThread({
                 forum,
                 vrchatID: vrchatInfo.vrchatID,
                 vrchatName: vrchatInfo.vrchatName,
                 signaleur: interaction.user,
-                type: (action === 'ban' || action === 'banned') ? 'ban' : 'suspect',
-                playersDB: this.playersDB
+                type: (action === 'ban' || action === 'banned') ? 'banned' : 'suspect',
+                playersDB: this.playersDB,
+                dataService: this.dataService // Passer le service de données
             });
 
             await interaction.editReply({
@@ -279,11 +237,11 @@ class VRChatLinkDetector {
             // Mettre à jour le message d'origine
             await this.updateMessageAfterFolderCreation(
                 interaction.message, 
-                (action === 'ban' || action === 'banned') ? 'ban' : 'suspect', 
+                (action === 'ban' || action === 'banned') ? 'banned' : 'suspect', 
                 vrchatInfo
             );
 
-            // Attendre la sélection des tags avec un timeout clair
+            // Attendre la sélection des tags avec un timeout
             try {
                 const tagInteraction = await interaction.channel.awaitMessageComponent({
                     filter: i => i.customId === 'select_tags' && i.user.id === interaction.user.id,
@@ -312,6 +270,10 @@ class VRChatLinkDetector {
         }
     }
 
+    /**
+     * Vérifie si un message a été abandonné
+     * @param {Message} message - Message Discord à vérifier
+     */
     async checkMessageAbandonment(message) {
         const pendingMessage = this.pendingMessages.get(message.id);
         if (!pendingMessage) return;
@@ -335,10 +297,16 @@ class VRChatLinkDetector {
         }
     }
 
+    /**
+     * Met à jour le message après la création d'un dossier
+     * @param {Message} message - Message à mettre à jour
+     * @param {string} type - Type de dossier ('banned' ou 'suspect')
+     * @param {Object} vrchatInfo - Informations VRChat
+     */
     async updateMessageAfterFolderCreation(message, type, vrchatInfo) {
         try {
             await message.edit({
-                content: `# Profil VRChat : \`${vrchatInfo.vrchatName}\`\nDossier ${type === 'ban' ? 'banni' : 'suspect'} créé avec succès.`,
+                content: `# Profil VRChat : \`${vrchatInfo.vrchatName}\`\nDossier ${type === 'banned' ? 'banni' : 'suspect'} créé avec succès.`,
                 components: []
             });
             this.pendingMessages.delete(message.id);
@@ -346,6 +314,20 @@ class VRChatLinkDetector {
             console.error('Erreur lors de la mise à jour du message:', error);
             this.pendingMessages.delete(message.id);
         }
+    }
+
+    /**
+     * Initialise le détecteur de liens
+     * @param {Client} client - Client Discord
+     */
+    initialize(client) {
+        // Écouter les nouveaux messages
+        client.on(Events.MessageCreate, message => this.handleMessage(message));
+        
+        // Écouter les interactions
+        client.on(Events.InteractionCreate, interaction => this.handleInteraction(interaction));
+        
+        console.log('VRChat Link Detector initialisé');
     }
 }
 
