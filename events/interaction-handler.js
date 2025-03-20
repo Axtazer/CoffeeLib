@@ -92,7 +92,6 @@ class InteractionHandler {
                 getString: (name) => {
                     if (name === 'vrchat_id') return detectedID;
                     if (name === 'type') return type;
-                    if (name === 'raison') return 'toxic';
                     return null;
                 }
             },

@@ -13,7 +13,7 @@ module.exports = {
                 .setRequired(false))
         .addBooleanOption(option =>
             option.setName('rebuild')
-                .setDescription('Reconstruire la base de données à partir des forums')
+                .setDescription('Reconstruire la base de données à partir des forums BAN et SUSPECTS.')
                 .setRequired(false)),
 
     async execute(interaction, playersDB) {
