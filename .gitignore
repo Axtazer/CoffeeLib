@@ -130,3 +130,5 @@ dist
 .pnp.*
 data/scanned_threads.json
 database/players.json
+data/scanned_threads.json
+database/players.json
