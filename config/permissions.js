@@ -22,6 +22,7 @@ module.exports = {
         '1335004221845536898', // Moderateur
         '1341404488279396528', // Modérateur Test
         '1336306060750749777', // Helpeur
+        '1352036054399582321', // Helpeur Test
         '1335004298513485924' // Apprenti Helpeur
     ],
 

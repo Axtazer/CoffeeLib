@@ -1,4 +1,9 @@
 const { ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
+const DEBUG = process.env.DEBUG === 'true';
+
+function debug(...args) {
+    if (DEBUG) console.log(...args);
+}
 
 class ThreadCreator {
     /**
@@ -18,7 +23,7 @@ class ThreadCreator {
             verifiedPermissions // Nouveau paramètre pour les permissions pré-vérifiées
         } = options;
 
-        console.log('Thread Creator - Options reçues:', {
+        debug('Thread Creator - Options reçues:', {
             vrchatID,
             vrchatName,
             type,
@@ -28,7 +33,7 @@ class ThreadCreator {
 
         // Si les permissions ont déjà été vérifiées, utiliser ces informations
         if (verifiedPermissions) {
-            console.log(`Utilisation des permissions pré-vérifiées pour ${signaleur.tag}`);
+            debug(`Utilisation des permissions pré-vérifiées pour ${signaleur.tag}`);
             const hasPermission = (type === 'ban') 
                 ? verifiedPermissions.canBan || verifiedPermissions.isAdmin
                 : verifiedPermissions.canSuspect || verifiedPermissions.isAdmin;
@@ -45,7 +50,7 @@ class ThreadCreator {
                 
                 // Vérifier les rôles directement
                 const memberRoles = Array.from(member.roles.cache.keys());
-                console.log(`Rôles de l'utilisateur ${member.user.tag} dans thread-creator:`, memberRoles);
+                debug(`Rôles de l'utilisateur ${member.user.tag} dans thread-creator:`, memberRoles);
                 
                 const { BAN_ROLES, SUSPECT_ROLES, ADMIN_USERS } = require('../config/permissions');
                 
@@ -102,7 +107,7 @@ class ThreadCreator {
                     `- Des preuves de son comportement\n` +
                     `- Toute information pertinente`;
 
-                console.log('Thread Creator - Message à créer:', {
+                    debug('Thread Creator - Message à créer:', {
                     title: vrchatName,
                     message: threadMessage,
                     vrchatID: vrchatID // Assurer que l'ID est enregistré ici
@@ -117,7 +122,7 @@ class ThreadCreator {
                     appliedTags: selectedTags
                 });
 
-                console.log('Thread Creator - Thread créé:', {
+                debug('Thread Creator - Thread créé:', {
                     threadId: thread.id,
                     threadName: thread.name,
                     messageContent: thread.messages.cache.first()?.content
@@ -137,10 +142,10 @@ class ThreadCreator {
 
                 // Utiliser le dataService si disponible, sinon utiliser directement playersDB
                 if (dataService) {
-                    console.log('Utilisation du dataService pour sauvegarder le joueur:', vrchatID);
+                    debug('Utilisation du dataService pour sauvegarder le joueur:', vrchatID);
                     dataService.savePlayerInfo(newPlayer);
                 } else {
-                    console.log('Utilisation directe de playersDB pour sauvegarder le joueur:', vrchatID);
+                    debug('Utilisation directe de playersDB pour sauvegarder le joueur:', vrchatID);
                     const existingPlayer = playersDB.findPlayer(vrchatID);
                     if (existingPlayer) {
                         playersDB.updatePlayer(existingPlayer, newPlayer);

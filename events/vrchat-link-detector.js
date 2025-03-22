@@ -9,7 +9,7 @@ class VRChatLinkDetector {
         this.dataService = new VRChatDataService(playersDB);
         this.ABANDON_TIMEOUT = 30000; // 30s avant de cloturer l'intéraction
         this.ABANDON_TAG = 30000 // 30s avant de cloturer le choix des tags
-        this.BUTTON_RESTORE_DELAY = 1000; // 1s avant de restaurer les boutons
+        this.BUTTON_RESTORE_DELAY = 40000; // 40s avant de restaurer les boutons
         this.pendingMessages = new Map();
         this.VRCHAT_LINK_CHANNEL_ID = process.env.VRCHAT_LINK_CHANNEL_ID;
         this.FORUM_BANNIS_ID = process.env.FORUM_BANNIS_ID;
@@ -277,7 +277,7 @@ class VRChatLinkDetector {
             try {
                 const tagInteraction = await interaction.channel.awaitMessageComponent({
                     filter: i => i.customId === 'select_tags' && i.user.id === interaction.user.id,
-                    time: ABANDON_TAG
+                    time: this.ABANDON_TIMEOUT
                 });
 
                 // Créer le thread avec les tags sélectionnés
