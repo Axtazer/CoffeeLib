@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -9,7 +9,7 @@ module.exports = {
     if (!interaction.member.permissions.has('MODERATE_MEMBERS')) {
       return interaction.reply({
         content: 'Vous n\'avez pas les permissions nécessaires pour utiliser cette commande.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
     
@@ -36,8 +36,8 @@ module.exports = {
     
     if (potentialDuplicates.length === 0) {
       return interaction.reply({
-        content: 'Aucun doublon potentiel trouvé dans la base de données.',
-        ephemeral: false
+        content: 'Aucun doublon trouvé dans la base de données.',
+        flags: MessageFlags.Ephemeral
       });
     }
     

@@ -8,22 +8,62 @@ class ThreadCreator {
      */
     static async createSignalementThread(options) {
         const {
-            forum,          // Le forum où créer le thread (suspects ou bannis)
-            vrchatID,       // L'ID VRChat du joueur
-            vrchatName,     // Le nom d'utilisateur VRChat
-            signaleur,      // L'utilisateur Discord qui signale
-            type,           // 'suspect' ou 'ban'
-            playersDB,      // Instance de la base de données
-            dataService     // Service de données VRChat (optionnel)
+            forum,
+            vrchatID,
+            vrchatName,
+            signaleur,
+            type,
+            playersDB,
+            dataService,
+            verifiedPermissions // Nouveau paramètre pour les permissions pré-vérifiées
         } = options;
 
         console.log('Thread Creator - Options reçues:', {
             vrchatID,
             vrchatName,
             type,
-            signaleurId: signaleur.id
+            signaleurId: signaleur.id,
+            hasVerifiedPermissions: !!verifiedPermissions
         });
 
+        // Si les permissions ont déjà été vérifiées, utiliser ces informations
+        if (verifiedPermissions) {
+            console.log(`Utilisation des permissions pré-vérifiées pour ${signaleur.tag}`);
+            const hasPermission = (type === 'ban') 
+                ? verifiedPermissions.canBan || verifiedPermissions.isAdmin
+                : verifiedPermissions.canSuspect || verifiedPermissions.isAdmin;
+                
+            if (!hasPermission) {
+                throw new Error(`L'utilisateur n'a pas les permissions pour créer un dossier de type ${type}`);
+            }
+        } else {
+            // Sinon, vérifier les permissions normalement
+            try {
+                // Récupérer le membre complet
+                const guild = forum.guild;
+                const member = await guild.members.fetch({ user: signaleur.id, force: true });
+                
+                // Vérifier les rôles directement
+                const memberRoles = Array.from(member.roles.cache.keys());
+                console.log(`Rôles de l'utilisateur ${member.user.tag} dans thread-creator:`, memberRoles);
+                
+                const { BAN_ROLES, SUSPECT_ROLES, ADMIN_USERS } = require('../config/permissions');
+                
+                const isAdmin = ADMIN_USERS.includes(member.id);
+                const hasPermission = isAdmin || 
+                    (type === 'ban' && memberRoles.some(roleId => BAN_ROLES.includes(roleId))) ||
+                    (type === 'suspect' && memberRoles.some(roleId => SUSPECT_ROLES.includes(roleId)));
+                    
+                if (!hasPermission) {
+                    throw new Error(`L'utilisateur n'a pas les permissions pour créer un dossier de type ${type}`);
+                }
+            } catch (error) {
+                console.error('Erreur lors de la vérification des permissions:', error);
+                throw error;
+            }
+        }
+
+        // Le reste du code reste inchangé...
         // Créer le menu de sélection des tags
         const tagMenu = new StringSelectMenuBuilder()
             .setCustomId('select_tags')
@@ -53,15 +93,14 @@ class ThreadCreator {
              */
             async createThread(selectedTags) {
                 // Créer le message du thread
-                const threadMessage = `**Nouveau signalement ${type === 'ban' ? 'banni' : 'suspect'}**\n\n` +
-                    `**Joueur:** ${vrchatName}\n` +
-                    `**Profil VRChat:** https://vrchat.com/home/user/${vrchatID}\n` +
-                    `**ID:** \`${vrchatID}\`\n` +
-                    `**Signalé par:** <@${signaleur.id}>\n\n` +
+                const threadMessage = `# Joueur: ${vrchatName}\n` +
+                    `## Profil VRChat: https://vrchat.com/home/user/${vrchatID}\n` +
+                    `-# ID: \`${vrchatID}\`\n` +
+                    `## Signalé par: <@${signaleur.id}>\n\n` +
                     `**Merci d'ajouter :**\n` +
-                    `• Une description du comportement et de votre démarche\n` +
-                    `• Des preuves de son comportement\n` +
-                    `• Toute information pertinente`;
+                    `- Une description du comportement et de votre démarche\n` +
+                    `- Des preuves de son comportement\n` +
+                    `- Toute information pertinente`;
 
                 console.log('Thread Creator - Message à créer:', {
                     title: vrchatName,

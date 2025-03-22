@@ -4,45 +4,15 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('statistiques')
         .setDescription('Affiche les statistiques de la base de données')
-        .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-        .addStringOption(option =>
-            option.setName('période')
-                .setDescription('Période pour les statistiques')
-                .setRequired(false)
-                .addChoices(
-                    { name: 'Aujourd\'hui', value: 'today' },
-                    { name: '7 derniers jours', value: 'week' },
-                    { name: '30 derniers jours', value: 'month' },
-                    { name: 'Tout', value: 'all' }
-                )),
+        .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
 
     async execute(interaction, playersDB) {
         await interaction.deferReply();
 
         try {
-            const period = interaction.options.getString('période') || 'all';
-            const now = new Date();
-            let startDate;
-
-            switch (period) {
-                case 'today':
-                    startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-                    break;
-                case 'week':
-                    startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-                    break;
-                case 'month':
-                    startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-                    break;
-                default:
-                    startDate = new Date(0); // Depuis le début
-            }
-
             const allPlayers = playersDB.getAllPlayers();
             const filteredPlayers = allPlayers.filter(player => {
-                if (!player.forumThreads || player.forumThreads.length === 0) return false;
-                const threadDate = new Date(player.forumThreads[0].createdAt);
-                return threadDate >= startDate;
+                return player.forumThreads && player.forumThreads.length > 0;
             });
 
             // Statistiques générales
@@ -77,10 +47,7 @@ module.exports = {
             const embed = new EmbedBuilder()
                 .setColor(0x0099FF)
                 .setTitle('Statistiques de la base de données')
-                .setDescription(`Période : ${period === 'all' ? 'Depuis le début' :
-                    period === 'today' ? 'Aujourd\'hui' :
-                    period === 'week' ? '7 derniers jours' :
-                    '30 derniers jours'}`)
+                .setDescription('Statistiques depuis le début')
                 .addFields(
                     { name: '📊 Statistiques générales', value: 
                         `**Total des joueurs :** ${totalPlayers}\n` +
@@ -120,7 +87,7 @@ module.exports = {
             console.error('Erreur lors de la génération des statistiques:', error);
             await interaction.editReply({
                 content: 'Une erreur est survenue lors de la génération des statistiques.',
-                ephemeral: true
+                flags: EmbedBuilder.Flags.Ephemeral
             });
         }
     },

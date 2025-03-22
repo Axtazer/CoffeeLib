@@ -3,70 +3,68 @@ const { Events } = require('discord.js');
 class VRChatDataService {
     constructor(playersDB) {
         this.playersDB = playersDB;
-        this.EMBED_WAIT_TIME = 450; // Temps avant de récup l'embed
-        this.MAX_RETRIES = 2; // Nombre de tentatives pour l'embed
-        this.RETRY_DELAY = 150; // Delais entre les tentatives
         this.VRCHAT_LINK_REGEX = /(?:https?:\/\/)?vrchat\.com\/home\/user\/([a-zA-Z0-9-_]+)/;
     }
-
-    /**
+      /**
      * Extrait les informations VRChat d'un message
      * @param {Message} message - Message Discord
      * @param {Object} options - Options d'extraction
      * @returns {Promise<Object|null>} - Informations VRChat ou null
      */
-    async extractVRChatInfo(message, options = {}) {
-        const { debug = false } = options;
-        const match = message.content.match(this.VRCHAT_LINK_REGEX);
-        if (!match || !match[1]) return null;
+      async extractVRChatInfo(message, options = {}) {
+          const { debug = false, maxWaitTime = 5000 } = options;
+          const match = message.content.match(this.VRCHAT_LINK_REGEX);
+          if (!match || !match[1]) return null;
 
-        const vrchatID = match[1];
-        let vrchatName = null;
+          const vrchatID = match[1];
+          let vrchatName = null;
 
-        // Utilisation d'une seule boucle avec Promise.race pour timeout
-        for (let attempt = 0; attempt < this.MAX_RETRIES; attempt++) {
-            try {
-                const fetchPromise = new Promise(async resolve => {
-                    await new Promise(r => setTimeout(r, this.EMBED_WAIT_TIME));
-                    const updatedMessage = await message.fetch();
-                    
-                    if (updatedMessage.embeds.length > 0) {
-                        const embed = updatedMessage.embeds[0];
-                        
-                        if (embed.data?.title) {
-                            vrchatName = embed.data.title;
-                            if (debug) console.log('Nom extrait depuis embed.data.title:', vrchatName);
-                            resolve(true);
-                        } else if (embed.title) {
-                            vrchatName = embed.title;
-                            if (debug) console.log('Nom extrait depuis embed.title:', vrchatName);
-                            resolve(true);
-                        } else {
-                            resolve(false);
-                        }
-                    } else {
-                        resolve(false);
-                    }
-                });
-
-                const timeoutPromise = new Promise(resolve => 
-                    setTimeout(() => resolve(false), this.EMBED_WAIT_TIME * 1.5));
-
-                const result = await Promise.race([fetchPromise, timeoutPromise]);
-                if (result) break;
-                
-                if (debug) console.log(`Tentative ${attempt + 1}/${this.MAX_RETRIES}`);
-            } catch (error) {
-                if (debug) console.log(`Tentative ${attempt + 1}/${this.MAX_RETRIES} échouée:`, error);
-            }
-        }
-
-        // Fallback si aucun nom n'est trouvé
-        vrchatName = vrchatName || vrchatID.replace(/^usr_/, '');
+          // Heure de début pour le timeout global
+          const startTime = Date.now();
         
-        return { vrchatID, vrchatName };
-    }
+          // Continuer à vérifier jusqu'à ce qu'on trouve le nom ou qu'on atteigne le délai maximum
+          while (Date.now() - startTime < maxWaitTime) {
+              try {
+                  if (debug) console.log(`Tentative de récupération du nom VRChat (temps écoulé: ${Date.now() - startTime}ms)`);
+                
+                  // Attendre un court instant entre chaque tentative
+                  await new Promise(r => setTimeout(r, 200));
+                
+                  // Récupérer le message mis à jour
+                  const updatedMessage = await message.fetch();
+                
+                  if (updatedMessage.embeds.length > 0) {
+                      const embed = updatedMessage.embeds[0];
+                    
+                      if (embed.data?.title) {
+                          vrchatName = embed.data.title;
+                          if (debug) console.log('Nom extrait depuis embed.data.title:', vrchatName);
+                          break; // Sortir de la boucle si on a trouvé le nom
+                      } else if (embed.title) {
+                          vrchatName = embed.title;
+                          if (debug) console.log('Nom extrait depuis embed.title:', vrchatName);
+                          break; // Sortir de la boucle si on a trouvé le nom
+                      }
+                  }
+              } catch (error) {
+                  if (debug) console.log('Erreur lors de la récupération du message:', error);
+                  // Continuer malgré l'erreur
+              }
+          }
 
+          // Fallback si aucun nom n'est trouvé
+          vrchatName = vrchatName || vrchatID.replace(/^usr_/, '');
+        
+          if (debug) {
+              if (vrchatName === vrchatID.replace(/^usr_/, '')) {
+                  console.log(`⚠️ Impossible de récupérer le nom VRChat après ${maxWaitTime}ms, utilisation de l'ID comme fallback`);
+              } else {
+                  console.log(`✅ Nom VRChat récupéré en ${Date.now() - startTime}ms: ${vrchatName}`);
+              }
+          }
+        
+          return { vrchatID, vrchatName };
+      }
     /**
      * Récupère les informations d'un joueur
      * @param {string} vrchatID - ID VRChat
