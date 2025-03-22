@@ -1,292 +1,457 @@
 const { Events, ButtonBuilder, ButtonStyle, ActionRowBuilder, MessageFlags } = require('discord.js');
-const { BAN_ROLES, SUSPECT_ROLES } = require('../config/permissions');
 const { createSignalementThread } = require('../utils/thread-creator');
+const VRChatDataService = require('../utils/vrchat-data-service');
+const PermissionsManager = require('../utils/permissions-manager');
 
 class VRChatLinkDetector {
     constructor(playersDB) {
         this.playersDB = playersDB;
-        this.EMBED_WAIT_TIME = 500; // Temps d'attente plus long pour l'embed
-        this.MAX_RETRIES = 3; // Nombre maximum de tentatives
-        this.RETRY_DELAY = 200; // Délai entre les tentatives en ms
+        this.dataService = new VRChatDataService(playersDB);
+        this.ABANDON_TIMEOUT = 30000; // 30s avant de cloturer l'intéraction
+        this.ABANDON_TAG = 30000 // 30s avant de cloturer le choix des tags
+        this.BUTTON_RESTORE_DELAY = 40000; // 40s avant de restaurer les boutons
+        this.pendingMessages = new Map();
+        this.VRCHAT_LINK_CHANNEL_ID = process.env.VRCHAT_LINK_CHANNEL_ID;
+        this.FORUM_BANNIS_ID = process.env.FORUM_BANNIS_ID;
+        this.FORUM_SUSPECTS_ID = process.env.FORUM_SUSPECTS_ID;
         this.DEBUG = process.env.DEBUG === 'true';
     }
 
     debug(...args) {
-        if (this.DEBUG) {
-            console.log(...args);
-        }
+        if (this.DEBUG) console.log(...args);
     }
 
-    async extractVRChatInfo(message) {
-        const vrchatLinkRegex = /(?:https?:\/\/)?vrchat\.com\/home\/user\/([a-zA-Z0-9-_]+)/;
-        const match = message.content.match(vrchatLinkRegex);
-        if (!match) return null;
+    async checkPermissions(member, type) {
+        return PermissionsManager.checkPermission(member, type);
+    }
 
-        const vrchatID = match[1];
-        if (!vrchatID) return null;
+    async createButtons(member, vrchatID) {
+        const permissions = PermissionsManager.getPermissions(member);
+        const buttons = [];
 
-        let vrchatName = null;
-        let attempt = 0;
-
-        while (attempt < this.MAX_RETRIES) {
-            try {
-                await new Promise(resolve => setTimeout(resolve, this.EMBED_WAIT_TIME));
-                const updatedMessage = await message.fetch();
-                
-                this.debug('Embed reçu:', updatedMessage.embeds[0]);
-                
-                if (updatedMessage.embeds.length > 0) {
-                    const embed = updatedMessage.embeds[0];
-                    this.debug('Structure de l\'embed:', {
-                        data: embed.data,
-                        title: embed.title,
-                        description: embed.description,
-                        fields: embed.fields,
-                        url: embed.url
-                    });
-                    
-                    // Extraire le nom depuis le titre de l'embed
-                    if (embed.data && embed.data.title) {
-                        vrchatName = embed.data.title;
-                        this.debug('Nom extrait depuis embed.data.title:', vrchatName);
-                        break;
-                    } else if (embed.title) {
-                        vrchatName = embed.title;
-                        this.debug('Nom extrait depuis embed.title:', vrchatName);
-                        break;
-                    }
-                }
-                attempt++;
-                this.debug(`Tentative ${attempt}/${this.MAX_RETRIES}`);
-            } catch (error) {
-                console.error(`Tentative ${attempt + 1}/${this.MAX_RETRIES} échouée:`, error);
-                attempt++;
-            }
+        if (permissions.canSuspect) {
+            buttons.push(new ButtonBuilder()
+                .setCustomId(`suspect_${vrchatID}`)
+                .setLabel('Créer dossier Suspect')
+                .setEmoji('⚠️')
+                .setStyle(ButtonStyle.Secondary));
+        }
+    
+        if (permissions.canBan) {
+            buttons.push(new ButtonBuilder()
+                .setCustomId(`ban_${vrchatID}`)
+                .setLabel('Créer dossier Banni')
+                .setEmoji('🔨')
+                .setStyle(ButtonStyle.Danger));
         }
 
-        // Si on n'a pas réussi à récupérer le nom, utiliser l'ID sans le préfixe usr_
-        if (!vrchatName) {
-            vrchatName = vrchatID.replace(/^usr_/, '');
-            this.debug('Aucun nom trouvé, utilisation de l\'ID comme fallback:', vrchatName);
+        return buttons.length ? new ActionRowBuilder().addComponents(buttons) : null;
+    }
+
+    async handleExistingPlayer(message, existingPlayer, vrchatInfo, member) {
+        const canBan = await this.checkPermissions(member, 'ban');
+        const status = existingPlayer.type === 'suspect' ? '⚠️ Suspect' : '🚫 Banni';
+
+        // Vérifie les permissions pour le type de dossier existant
+        if (existingPlayer.type === 'ban' && !canBan) {
+            await message.reply({ 
+                content: "Vous n'avez pas les permissions pour gérer les dossiers bannis.\nVa voir le salon <#1343718631833473106>",
+                flags: MessageFlags.Ephemeral 
+            });
+            return;
         }
 
-        const result = { vrchatID, vrchatName };
-        this.debug('Informations VRChat extraites:', result);
-        return result;
+        // Nettoyer les threads invalides en utilisant le service de données
+        const { player: updatedPlayer, validThreads } = 
+            await this.dataService.cleanInvalidThreads(existingPlayer, message.guild);
+
+        // Si tous les threads ont été supprimés, permettre d'en créer un nouveau
+        if (validThreads.length === 0) {
+            const row = await this.createButtons(member, vrchatInfo.vrchatID);
+        
+            if (row) {
+                const botMessage = await message.reply({
+                    content: `# ${status}\n## Profil VRChat : \`${vrchatInfo.vrchatName}\`\n⚠️ Ce joueur été déjà enregistré comme ${existingPlayer.type === 'ban' ? 'banni' : 'suspect'}, mais le thread semble avoir été supprimé.\nVeuillez choisir le type de dossier à créer.`,
+                    components: [row],
+                    allowedMentions: { parse: [] }
+                });
+            
+                // Ajouter le message aux messages en attente pour gérer l'abandon
+                this.pendingMessages.set(botMessage.id, {
+                    timestamp: Date.now(),
+                    messageId: botMessage.id,
+                    channelId: botMessage.channelId,
+                    vrchatInfo: vrchatInfo
+                });
+
+                // Planifier la vérification d'abandon
+                setTimeout(() => this.checkMessageAbandonment(botMessage), this.ABANDON_TIMEOUT);
+            } 
+            return;
+        }
+
+        // Afficher les threads existants
+        await message.reply({
+            content: `# ${status}\n## Profil VRChat : \`${vrchatInfo.vrchatName}\`\n### Thread: ${validThreads.join('\n')}\n-# ID VRC : \`${vrchatInfo.vrchatID}\``,
+            allowedMentions: { parse: [] }
+        });
     }
 
     async handleMessage(message) {
-        if (message.channel.id !== process.env.VRCHAT_LINK_CHANNEL_ID) return;
-        if (message.author.bot) return;
-
-        const vrchatInfo = await this.extractVRChatInfo(message);
-        if (!vrchatInfo) return;
-
-        // Vérifier les permissions de l'auteur du message
-        const member = await message.guild.members.fetch(message.author.id);
-        const canSuspect = member.roles.cache.some(role => SUSPECT_ROLES.includes(role.id));
-        const canBan = member.roles.cache.some(role => BAN_ROLES.includes(role.id));
-
-        if (!canSuspect && !canBan) return;
+        // Filtres rapides pour éviter les traitements inutiles
+        if (message.channel.id !== this.VRCHAT_LINK_CHANNEL_ID || message.author.bot) return;
 
         try {
-            // Vérifier si le joueur existe déjà dans la base de données
-            const existingPlayer = this.playersDB.findPlayer(vrchatInfo.vrchatID);
-            if (existingPlayer) {
-                const status = existingPlayer.type === 'suspect' ? '⚠️ Suspect' : '🚫 Banni';
+            // Utiliser le service de données pour extraire les infos VRChat
+            const vrchatInfo = await this.dataService.extractVRChatInfo(message, {
+                debug: this.DEBUG
+            });
+            
+            if (!vrchatInfo) return;
+            this.debug('Informations VRChat extraites:', vrchatInfo);
 
-                // Vérifier si les threads existent toujours
-                const threadLinks = [];
-                const threadsToRemove = [];
-                
-                for (const threadInfo of existingPlayer.forumThreads) {
-                    try {
-                        const thread = await message.guild.channels.fetch(threadInfo.threadId);
-                        if (thread) {
-                            threadLinks.push(`<#${threadInfo.threadId}>`);
-                        } else {
-                            this.debug(`Thread ${threadInfo.threadId} introuvable, sera supprimé`);
-                            threadsToRemove.push(threadInfo.threadId);
-                        }
-                    } catch (error) {
-                        this.debug(`Thread ${threadInfo.threadId} introuvable (erreur), sera supprimé:`, error);
-                        threadsToRemove.push(threadInfo.threadId);
-                    }
-                }
+            // Récupérer le membre et vérifier ses permissions
+            const member = await message.guild.members.fetch(message.author.id);
+            const canSuspect = await this.checkPermissions(member, 'suspect');
+            const canBan = await this.checkPermissions(member, 'ban');
 
-                // Supprimer les threads qui n'existent plus
-                if (threadsToRemove.length > 0) {
-                    const updatedPlayer = {
-                        ...existingPlayer,
-                        forumThreads: existingPlayer.forumThreads.filter(
-                            t => !threadsToRemove.includes(t.threadId)
-                        )
-                    };
-                    await this.playersDB.updatePlayer(existingPlayer, updatedPlayer);
-                    this.debug(`${threadsToRemove.length} thread(s) supprimé(s) de la base de données`);
-                }
-
-                // Si tous les threads ont été supprimés, permettre d'en créer un nouveau
-                if (threadLinks.length === 0) {
-                    this.debug('Tous les threads ont été supprimés, permettre d\'en créer un nouveau');
-                    // Créer les boutons
-                    const buttons = [];
-                    if (canSuspect) {
-                        const suspectButton = new ButtonBuilder()
-                            .setCustomId(`suspect_${message.id}`)
-                            .setLabel('Créer un thread Suspect')
-                            .setStyle(ButtonStyle.Primary)
-                            .setEmoji('⚠️');
-                        buttons.push(suspectButton);
-                    }
-                    if (canBan) {
-                        const banButton = new ButtonBuilder()
-                            .setCustomId(`banned_${message.id}`)
-                            .setLabel('Créer un thread Ban')
-                            .setStyle(ButtonStyle.Danger)
-                            .setEmoji('🚫');
-                        buttons.push(banButton);
-                    }
-
-                    const row = new ActionRowBuilder().addComponents(buttons);
-
-                    // Envoyer le message avec les boutons
-                    await message.reply({
-                        content: `${status}\n**ID VRChat:** \`${vrchatInfo.vrchatID}\`\n\n⚠️ Les anciens threads ont été supprimés, vous pouvez en créer un nouveau.`,
-                        components: [row],
-                        allowedMentions: { parse: [] }
-                    });
-                    return;
-                }
-
-                // Sinon, afficher les threads existants
-                await message.reply({
-                    content: `${status}\n**ID VRChat:** \`${vrchatInfo.vrchatID}\`\n\n**Threads:**\n${threadLinks.join('\n')}`,
-                    allowedMentions: { parse: [] }
+            if (!canSuspect && !canBan) {
+                await message.reply({ 
+                    content: "Vous n'avez pas les permissions nécessaires pour créer des signalements.",
+                    flags: MessageFlags.Ephemeral 
                 });
                 return;
             }
 
-            // Créer les boutons
-            const buttons = [];
-            if (canSuspect) {
-                const suspectButton = new ButtonBuilder()
-                    .setCustomId(`suspect_${message.id}`)
-                    .setLabel('Créer un thread Suspect')
-                    .setStyle(ButtonStyle.Primary)
-                    .setEmoji('⚠️');
-                buttons.push(suspectButton);
-            }
-            if (canBan) {
-                const banButton = new ButtonBuilder()
-                    .setCustomId(`banned_${message.id}`)
-                    .setLabel('Créer un thread Ban')
-                    .setStyle(ButtonStyle.Danger)
-                    .setEmoji('🚫');
-                buttons.push(banButton);
+            // Vérifier si le joueur existe déjà dans la base de données via le service
+            const existingPlayer = this.dataService ? this.dataService.getPlayerInfo(vrchatInfo.vrchatID) : null;
+            if (existingPlayer) {
+                await this.handleExistingPlayer(message, existingPlayer, vrchatInfo, member);
+                return;
             }
 
-            const row = new ActionRowBuilder().addComponents(buttons);
+            // Traiter un nouveau joueur
+            const row = await this.createButtons(member, vrchatInfo.vrchatID);
+            if (!row) {
+                await message.reply({
+                    content: "Vous n'avez pas les permissions nécessaires pour créer des signalements.",
+                    flags: MessageFlags.Ephemeral
+                });
+                return;
+            }
 
-            // Envoyer le message avec les boutons
-            const reply = await message.reply({
-                content: `Lien VRChat détecté pour **${vrchatInfo.vrchatName}**`,
+            const botMessage = await message.reply({
+                content: `# Profil VRChat : \`${vrchatInfo.vrchatName}\`\nVeuillez choisir le type de dossier à créer.`,
                 components: [row]
             });
 
-            this.debug('Message de réponse créé:', {
-                messageId: message.id,
-                replyId: reply.id,
-                vrchatInfo
+            // Ajouter le message aux messages en attente
+            this.pendingMessages.set(botMessage.id, {
+                timestamp: Date.now(),
+                messageId: botMessage.id,
+                channelId: botMessage.channelId,
+                vrchatInfo: vrchatInfo
             });
 
+            // Planifier la vérification d'abandon
+            setTimeout(() => this.checkMessageAbandonment(botMessage), this.ABANDON_TIMEOUT);
         } catch (error) {
-            console.error('Erreur lors de la création des boutons:', error);
+            console.error('Erreur lors du traitement du message:', error);
+            await message.reply({ 
+                content: 'Une erreur est survenue lors du traitement de votre message.',
+                flags: MessageFlags.Ephemeral 
+            });
         }
     }
 
     async handleInteraction(interaction) {
         if (!interaction.isButton()) return;
 
-        const [action, messageId] = interaction.customId.split('_');
-        if (!['suspect', 'banned'].includes(action)) return;
+        // Extraire l'action et l'ID correctement
+        const customId = interaction.customId;
+        const firstUnderscoreIndex = customId.indexOf('_');
+        const action = customId.substring(0, firstUnderscoreIndex);
+        const vrchatID = customId.substring(firstUnderscoreIndex + 1);
+
+        if (!['suspect', 'ban', 'banned'].includes(action)) return;
+
+        // Au début de handleInteraction
+        const originalButtons = [];
+        if (interaction.message.components && interaction.message.components.length > 0 &&
+            interaction.message.components[0].components) {
+            // Extraire et stocker les boutons individuellement
+            for (const button of interaction.message.components[0].components) {
+                originalButtons.push({
+                    customId: button.customId,
+                    label: button.label,
+                    style: button.style,
+                    emoji: button.emoji
+                });
+            }
+        }
 
         try {
-            // Récupérer le message original qui contient le lien VRChat
-            const originalMessage = await interaction.channel.messages.fetch(messageId);
-            this.debug('Message original récupéré:', originalMessage.id);
-            
-            const vrchatInfo = await this.extractVRChatInfo(originalMessage);
-            this.debug('Informations VRChat extraites dans handleInteraction:', vrchatInfo);
-
-            if (!vrchatInfo) {
-                await interaction.reply({ content: 'Impossible de récupérer les informations VRChat.', ephemeral: true });
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        
+            // Récupérer le membre complet du serveur
+            const member = await interaction.guild.members.fetch(interaction.user.id);
+        
+            // Vérifier les permissions pour cette action spécifique
+            const hasPermission = await this.checkPermissions(member, action);
+            if (!hasPermission) {
+                await interaction.editReply({ 
+                    content: `Vous n'avez pas les permissions nécessaires pour créer un dossier de type ${action}.`,
+                    flags: MessageFlags.Ephemeral 
+                });
                 return;
             }
+        
+            // Supprimer ce message des messages en attente pour éviter l'abandon
+            this.pendingMessages.delete(interaction.message.id);
+        
+            const originalMessage = await interaction.channel.messages.fetch(interaction.message.id);
+            const nameMatch = originalMessage.content.match(/`([^`]+)`/);
+            const vrchatName = nameMatch ? nameMatch[1] : vrchatID;
 
-            const forum = interaction.guild.channels.cache.get(
-                action === 'banned' ? process.env.FORUM_BANNIS_ID : process.env.FORUM_SUSPECTS_ID
-            );
-
+            const vrchatInfo = { vrchatID, vrchatName };
+        
+            // Sélection du forum approprié
+            const forumId = (action === 'ban' || action === 'banned') 
+                ? this.FORUM_BANNIS_ID 
+                : this.FORUM_SUSPECTS_ID;
+                
+            const forum = interaction.guild.channels.cache.get(forumId);
             if (!forum) {
-                await interaction.reply({ content: 'Forum introuvable.', ephemeral: true });
+                await interaction.editReply({ content: 'Forum introuvable.' });
+            
+                // Attendre le délai configuré avant de restaurer les boutons
+                setTimeout(async () => {
+                    try {
+                        // Restaurer les boutons car aucun dossier n'a été créé
+                        if (originalButtons.length > 0) {
+                            const newButtons = originalButtons.map(btnData => {
+                                return new ButtonBuilder()
+                                    .setCustomId(btnData.customId)
+                                    .setLabel(btnData.label)
+                                    .setStyle(btnData.style)
+                                    .setEmoji(btnData.emoji || null);
+                            });
+                            
+                            const row = new ActionRowBuilder().addComponents(newButtons);
+                            await interaction.message.edit({
+                                content: interaction.message.content,
+                                components: [row]
+                            });
+                        }
+                    } catch (restoreError) {
+                        console.error('Erreur lors de la restauration des boutons après forum introuvable:', restoreError);
+                    }                   
+                }, this.BUTTON_RESTORE_DELAY);
+            
                 return;
             }
 
-            this.debug('Création du thread avec les infos:', {
-                vrchatID: vrchatInfo.vrchatID,
-                vrchatName: vrchatInfo.vrchatName,
-                type: action
-            });
-
-            // Créer le thread avec les informations exactes de l'embed
+            // Créer le thread
             const threadCreator = await createSignalementThread({
                 forum,
                 vrchatID: vrchatInfo.vrchatID,
                 vrchatName: vrchatInfo.vrchatName,
                 signaleur: interaction.user,
-                type: action,
-                playersDB: this.playersDB
+                type: (action === 'ban' || action === 'banned') ? 'ban' : 'suspect',
+                playersDB: this.playersDB,
+                dataService: this.dataService
             });
 
-            await interaction.reply({
+            await interaction.editReply({
                 content: threadCreator.content,
-                components: threadCreator.components,
-                ephemeral: true
+                components: threadCreator.components
             });
 
-            // Attendre la sélection des tags
-            const tagInteraction = await interaction.channel.awaitMessageComponent({
-                filter: i => i.customId === 'select_tags' && i.user.id === interaction.user.id,
-                time: 60000
+            // Désactiver temporairement les boutons pendant la création
+            await interaction.message.edit({
+                content: interaction.message.content,
+                components: []
             });
 
-            // Créer le thread avec les tags sélectionnés
-            const thread = await threadCreator.createThread(tagInteraction.values);
+            // Attendre la sélection des tags avec un timeout clair
+            try {
+                const tagInteraction = await interaction.channel.awaitMessageComponent({
+                    filter: i => i.customId === 'select_tags' && i.user.id === interaction.user.id,
+                    time: this.ABANDON_TIMEOUT
+                });
 
-            await tagInteraction.update({
-                content: `✅ Thread créé : <#${thread.id}>`,
-                components: [],
-                ephemeral: true
-            });
+                // Créer le thread avec les tags sélectionnés
+                const thread = await threadCreator.createThread(tagInteraction.values);
 
-        } catch (error) {
-            console.error('Erreur lors de la création du thread:', error);
-            if (error.code === 'INTERACTION_COLLECTOR_ERROR') {
+                // Mettre à jour le message d'origine APRÈS la création réussie du thread
+                await this.updateMessageAfterFolderCreation(
+                    interaction.message, 
+                    (action === 'ban' || action === 'banned') ? 'ban' : 'suspect', 
+                    vrchatInfo
+                );
+
+                await tagInteraction.update({
+                    content: `✅ Thread créé : <#${thread.id}>`,
+                    components: []
+                });
+            } catch (timeoutError) {
                 await interaction.editReply({
                     content: '⏰ Le temps de sélection des tags est écoulé.',
-                    components: [],
-                    ephemeral: true
-                }).catch(() => {});
-            } else {
-                await interaction.editReply({
-                    content: 'Une erreur est survenue lors de la création du thread.',
-                    components: [],
-                    ephemeral: true
-                }).catch(() => {});
+                    components: []
+                });
+            
+                // Attendre le délai configuré avant de restaurer les boutons
+                setTimeout(async () => {
+                    try {
+                        if (originalButtons.length > 0) {
+                            const newButtons = originalButtons.map(btnData => {
+                                return new ButtonBuilder()
+                                    .setCustomId(btnData.customId)
+                                    .setLabel(btnData.label)
+                                    .setStyle(btnData.style)
+                                    .setEmoji(btnData.emoji || null);
+                            });
+                            
+                            const row = new ActionRowBuilder().addComponents(newButtons);
+                            await interaction.message.edit({
+                                content: interaction.message.content,
+                                components: [row]
+                            });
+                            console.log('Boutons restaurés avec succès après timeout');
+                            
+                            // Réajouter le message à la liste des messages en attente
+                            this.pendingMessages.set(interaction.message.id, {
+                                timestamp: Date.now(),
+                                messageId: interaction.message.id,
+                                channelId: interaction.message.channelId,
+                                vrchatInfo: vrchatInfo
+                            });
+                            
+                            // Planifier un nouveau timeout pour l'abandon
+                            setTimeout(() => this.checkMessageAbandonment(interaction.message), this.ABANDON_TIMEOUT);
+                        } else {
+                            // Recréer les boutons si les originaux ne sont pas disponibles
+                            const row = await this.createButtons(member, vrchatID);
+                            if (row) {
+                                await interaction.message.edit({
+                                    content: interaction.message.content,
+                                    components: [row]
+                                });
+                                console.log('Boutons recréés avec succès après timeout');
+                                
+                                // Réajouter le message à la liste des messages en attente
+                                this.pendingMessages.set(interaction.message.id, {
+                                    timestamp: Date.now(),
+                                    messageId: interaction.message.id,
+                                    channelId: interaction.message.channelId,
+                                    vrchatInfo: vrchatInfo
+                                });
+                                
+                                // Planifier un nouveau timeout pour l'abandon
+                                setTimeout(() => this.checkMessageAbandonment(interaction.message), this.ABANDON_TIMEOUT);
+                            } else {
+                                console.log('Impossible de recréer les boutons: aucun bouton disponible');
+                            }
+                        }
+                    } catch (restoreError) {
+                        console.error('Erreur lors de la restauration des boutons après timeout:', restoreError);
+                        
+                        // Tentative de secours: recréer les boutons
+                        try {
+                            const row = await this.createButtons(member, vrchatID);
+                            if (row) {
+                                await interaction.message.edit({
+                                    content: interaction.message.content,
+                                    components: [row]
+                                });
+                                console.log('Boutons recréés avec succès (secours) après timeout');
+                            }
+                        } catch (fallbackError) {
+                            console.error('Échec de la tentative de secours pour recréer les boutons:', fallbackError);
+                        }
+                    }
+                }, this.BUTTON_RESTORE_DELAY);
             }
+        } catch (error) {
+            console.error('Erreur lors de la création du thread:', error);
+            await interaction.editReply({
+                content: 'Une erreur est survenue lors de la création du thread.',
+                components: []
+            }).catch(() => {});
+        
+            // Attendre le délai configuré avant de restaurer les boutons
+            setTimeout(async () => {
+                try {
+                    // Vérifier si le message existe toujours
+                    const messageToUpdate = await interaction.channel.messages.fetch(interaction.message.id);
+                    if (messageToUpdate) {
+                        // Procéder à la restauration des boutons
+                        if (originalButtons.length > 0) {
+                            const newButtons = originalButtons.map(btnData => {
+                                return new ButtonBuilder()
+                                    .setCustomId(btnData.customId)
+                                    .setLabel(btnData.label)
+                                    .setStyle(btnData.style)
+                                    .setEmoji(btnData.emoji || null);
+                            });
+                            
+                            const row = new ActionRowBuilder().addComponents(newButtons);
+                            await messageToUpdate.edit({
+                                content: messageToUpdate.content,
+                                components: [row]
+                            });
+                        } else {
+                            // Sinon, recréer les boutons
+                            const member = await interaction.guild.members.fetch(interaction.user.id);
+                            const row = await this.createButtons(member, vrchatID);
+                            if (row) {
+                                await messageToUpdate.edit({
+                                    content: messageToUpdate.content,
+                                    components: [row]
+                                });
+                            }
+                        }
+                    }
+                } catch (fetchError) {
+                    console.error('Le message n\'existe plus ou ne peut pas être récupéré:', fetchError);
+                }
+            }, this.BUTTON_RESTORE_DELAY);
         }
     }
-}
-
-module.exports = VRChatLinkDetector;
+    
+    async checkMessageAbandonment(message) {
+        const pendingMessage = this.pendingMessages.get(message.id);
+        if (!pendingMessage) return;
+    
+        try {
+            const channel = await message.client.channels.fetch(pendingMessage.channelId);
+            const msg = await channel.messages.fetch(pendingMessage.messageId);
+            
+            await msg.edit({
+                content: `~~${msg.content}~~\n## T'as oublié de me répondre <:PIKACHUcrysadpokemon:1345046089228750902>`,
+                components: []
+            });
+            
+            this.pendingMessages.delete(message.id);
+        } catch (error) {
+            console.error('Erreur lors de la mise à jour du message abandonné:', error);
+            this.pendingMessages.delete(message.id);
+        }
+    }
+    
+    async updateMessageAfterFolderCreation(message, type, vrchatInfo) {
+        try {
+            await message.edit({
+                content: `# Profil VRChat : \`${vrchatInfo.vrchatName}\`\nDossier ${type === 'ban' ? 'banni' : 'suspect'} créé avec succès.`,
+                components: []
+            });
+            this.pendingMessages.delete(message.id);
+        } catch (error) {
+            console.error('Erreur lors de la mise à jour du message:', error);
+            this.pendingMessages.delete(message.id);
+        }
+    }
+    }
+    
+    module.exports = VRChatLinkDetector;
+    
